@@ -1,0 +1,9 @@
+build/
+managed_components/
+sdkconfig.old
+dependencies.lock
+assets_sd/
+tools/.cache/
+.DS_Store
+*.pyc
+__pycache__/

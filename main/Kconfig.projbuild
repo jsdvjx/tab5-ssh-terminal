@@ -1,0 +1,52 @@
+menu "Tab5 SSH Terminal"
+
+    config TAB5_WIFI_SSID
+        string "Wi-Fi SSID"
+        default "myssid"
+
+    config TAB5_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default "mypassword"
+
+    config TAB5_SSH_HOST
+        string "SSH host (IP or hostname)"
+        default "192.168.1.100"
+
+    config TAB5_SSH_PORT
+        int "SSH port"
+        default 22
+
+    config TAB5_SSH_USER
+        string "SSH username"
+        default "user"
+
+    config TAB5_SSH_PASSWORD
+        string "SSH password"
+        default "password"
+        help
+            Password auth for the skeleton. Switch to
+            libssh2_userauth_publickey_frommemory() for key auth later.
+
+    choice TAB5_TERM_FONT
+        prompt "Terminal font"
+        default TAB5_FONT_MEDIUM
+        help
+            Cell size determines the grid: the PTY is sized to match, so the
+            remote side sees the real cols x rows.
+
+        config TAB5_FONT_SMALL
+            bool "unscii-16, 8x16 cells (160x45 grid) — dense"
+        config TAB5_FONT_MEDIUM
+            bool "JetBrains Mono 20, 12x24 cells (106x30 grid)"
+        config TAB5_FONT_LARGE
+            bool "JetBrains Mono 30, 18x36 cells (71x20 grid)"
+    endchoice
+
+    config TAB5_SSH_COMMAND
+        string "Command to run after login (empty = interactive shell)"
+        default ""
+        help
+            e.g. "tmux new -A -s tab5" to get session persistence across
+            reconnects.
+
+endmenu

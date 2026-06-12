@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tab5 SSH 配置</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --card-border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #3fb950;
+    --accent-dim: #238636;
+    --danger: #f85149;
+    --input-bg: #0d1117;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 96px;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; }
+  h1 { font-size: 22px; margin: 0; font-weight: 600; }
+  h1 .dot { color: var(--accent); }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .card {
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 12px; padding: 16px; margin-bottom: 14px;
+    transition: border-color .15s;
+  }
+  .card.active { border-color: var(--accent-dim); }
+  .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .card-head .badge {
+    font-size: 11px; padding: 2px 10px; border-radius: 999px;
+    background: rgba(63,185,80,.15); color: var(--accent);
+    border: 1px solid var(--accent-dim); display: none;
+  }
+  .card.active .badge { display: inline-block; }
+  .card-head .title { font-weight: 600; flex: 1; }
+  .grid {
+    display: grid; gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  }
+  .field label {
+    display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px;
+  }
+  .field input {
+    width: 100%; padding: 8px 10px; font-size: 14px;
+    background: var(--input-bg); color: var(--text);
+    border: 1px solid var(--card-border); border-radius: 8px;
+    outline: none; transition: border-color .15s;
+  }
+  .field input:focus { border-color: #58a6ff; }
+  .field.wide { grid-column: 1 / -1; }
+  .row-actions { display: flex; gap: 8px; margin-top: 14px; }
+  button {
+    font-size: 13px; padding: 7px 16px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--card-border); background: #21262d; color: var(--text);
+    transition: filter .15s, background .15s;
+  }
+  button:hover { filter: brightness(1.2); }
+  button.primary { background: var(--accent-dim); border-color: var(--accent-dim); color: #fff; }
+  button.ghost-danger { background: transparent; color: var(--danger); border-color: transparent; }
+  .empty {
+    text-align: center; color: var(--muted); padding: 48px 0; font-size: 14px;
+    border: 1px dashed var(--card-border); border-radius: 12px; margin-bottom: 14px;
+  }
+  .bottom-bar {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    background: rgba(13,17,23,.92); backdrop-filter: blur(8px);
+    border-top: 1px solid var(--card-border); padding: 12px 16px;
+  }
+  .bottom-bar .inner {
+    max-width: 720px; margin: 0 auto; display: flex; gap: 10px; align-items: center;
+  }
+  .bottom-bar .spacer { flex: 1; }
+  #toast {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%) translateY(-80px);
+    background: var(--card); border: 1px solid var(--accent-dim); color: var(--text);
+    padding: 10px 22px; border-radius: 10px; font-size: 14px;
+    transition: transform .25s ease; z-index: 10;
+  }
+  #toast.show { transform: translateX(-50%) translateY(0); }
+  #toast.err { border-color: var(--danger); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Tab5 SSH 配置<span class="dot">_</span></h1>
+    <span class="sub">改完记得保存 · 密码留空表示不修改</span>
+  </header>
+  <div id="cards"></div>
+</div>
+
+<div class="bottom-bar">
+  <div class="inner">
+    <button onclick="addTarget()">＋ 添加服务器</button>
+    <div class="spacer"></div>
+    <button class="primary" onclick="saveAll()">保存全部</button>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+var targets = [];
+var activeIdx = -1;
+
+var FIELDS = [
+  { key: "name", label: "名称",   ph: "我的 Mac" },
+  { key: "host", label: "主机 *", ph: "192.168.2.10" },
+  { key: "port", label: "端口",   ph: "22" },
+  { key: "user", label: "用户名", ph: "jinxing" },
+  { key: "pass", label: "密码",   ph: "(不修改)" },
+  { key: "cmd",  label: "登录后命令", ph: "tmux new -A -s tab5", wide: true }
+];
+
+function toast(msg, isErr) {
+  var t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = "show" + (isErr ? " err" : "");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(function () { t.className = ""; }, 2200);
+}
+
+function render() {
+  var box = document.getElementById("cards");
+  box.innerHTML = "";
+  if (targets.length === 0) {
+    var d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = "还没有服务器，点下方「添加服务器」";
+    box.appendChild(d);
+    return;
+  }
+  targets.forEach(function (t, i) {
+    var card = document.createElement("div");
+    card.className = "card" + (i === activeIdx ? " active" : "");
+
+    var head = document.createElement("div");
+    head.className = "card-head";
+    var title = document.createElement("span");
+    title.className = "title";
+    title.textContent = (t.name || t.host || "新服务器");
+    var badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = "当前连接";
+    head.appendChild(title);
+    head.appendChild(badge);
+    card.appendChild(head);
+
+    var grid = document.createElement("div");
+    grid.className = "grid";
+    FIELDS.forEach(function (f) {
+      var fd = document.createElement("div");
+      fd.className = "field" + (f.wide ? " wide" : "");
+      var lb = document.createElement("label");
+      lb.textContent = f.label;
+      var inp = document.createElement("input");
+      inp.placeholder = f.ph;
+      inp.value = (t[f.key] == null) ? "" : t[f.key];
+      if (f.key === "pass") inp.type = "password";
+      inp.addEventListener("input", function () {
+        if (f.key === "port") {
+          t.port = parseInt(inp.value, 10) || 22;
+        } else {
+          t[f.key] = inp.value;
+        }
+        if (f.key === "name" || f.key === "host") {
+          title.textContent = (t.name || t.host || "新服务器");
+        }
+      });
+      fd.appendChild(lb);
+      fd.appendChild(inp);
+      grid.appendChild(fd);
+    });
+    card.appendChild(grid);
+
+    var actions = document.createElement("div");
+    actions.className = "row-actions";
+    var conn = document.createElement("button");
+    conn.textContent = "连接这台";
+    conn.addEventListener("click", function () {
+      fetch("/api/connect", { method: "POST", body: JSON.stringify({ index: i }) })
+        .then(function (r) {
+          if (r.ok) { activeIdx = i; render(); toast("已请求切换到 " + (t.name || t.host)); }
+          else toast("切换失败", true);
+        })
+        .catch(function () { toast("网络错误", true); });
+    });
+    var del = document.createElement("button");
+    del.className = "ghost-danger";
+    del.textContent = "删除";
+    del.addEventListener("click", function () {
+      targets.splice(i, 1);
+      if (activeIdx === i) activeIdx = -1;
+      render();
+    });
+    actions.appendChild(conn);
+    actions.appendChild(del);
+    card.appendChild(actions);
+
+    box.appendChild(card);
+  });
+}
+
+function addTarget() {
+  targets.push({ name: "", host: "", port: 22, user: "", pass: "", cmd: "tmux new -A -s tab5" });
+  render();
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function saveAll() {
+  var bad = targets.some(function (t) { return !t.host; });
+  if (bad) { toast("有服务器没填主机地址", true); return; }
+  fetch("/api/targets", { method: "POST", body: JSON.stringify({ targets: targets }) })
+    .then(function (r) {
+      if (r.ok) { toast("已保存 " + targets.length + " 台服务器"); load(); }
+      else toast("保存失败", true);
+    })
+    .catch(function () { toast("网络错误", true); });
+}
+
+function load() {
+  fetch("/api/targets")
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      targets = j.targets || [];
+      activeIdx = (typeof j.active === "number") ? j.active : -1;
+      render();
+    })
+    .catch(function () { toast("加载失败", true); });
+}
+
+load();
+</script>
+</body>
+</html>

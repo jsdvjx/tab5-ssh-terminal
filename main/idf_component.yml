@@ -1,0 +1,10 @@
+dependencies:
+  idf: ">=5.4"
+  # Board support: now a LOCAL component at components/m5stack_tab5 (patched
+  # for the ST7121 panel revision, Apr 2026+); was espressif/m5stack_tab5 ^1.2.0
+  # Wi-Fi on ESP32-P4 is proxied to the onboard ESP32-C6 (pulls esp_hosted)
+  espressif/esp_wifi_remote: "*"
+  # libssh2 1.11 port, mbedTLS backend
+  skuodi/libssh2_esp: "^1.1.0"
+  # USB-A host port -> external keyboard
+  espressif/usb_host_hid: "^1.0.4"

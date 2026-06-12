@@ -1,0 +1,20 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "wifi.c"
+        "ssh_client.c"
+        "hid_keyboard.c"
+        "i2c_keyboard.c"
+        "settings.c"
+        "setup.c"
+        "assets.c"
+        "ui_panel.c"
+        "web_config.c"
+        "term/term.c"
+        "term/term_render.c"
+        "term/fonts/jbmono_20.c"
+        "term/fonts/jbmono_30.c"
+        "term/fonts/cjk24.c"
+    INCLUDE_DIRS "." "term"
+    EMBED_TXTFILES "web/index.html"
+)
