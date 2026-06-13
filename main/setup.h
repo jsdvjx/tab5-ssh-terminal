@@ -15,3 +15,7 @@ bool setup_offered(term_t *t, int timeout_ms);
 // Wi-Fi onboarding: scan -> touch-pick SSID -> type password -> save to NVS.
 // Returns false if the scan found nothing (caller may retry).
 bool setup_wifi(term_t *t, settings_t *s);
+
+// Abort a blocking setup prompt from another task (BLE provisioning wrote
+// credentials). setup_wifi then returns true with the BLE-provided creds.
+void setup_cancel(void);

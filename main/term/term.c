@@ -34,6 +34,7 @@ struct term {
     int saved_col, saved_row;
     bool cursor_visible;
     bool app_cursor_keys;     // DECCKM
+    bool bracketed_paste;     // DECSET/DECRST 2004
     int scroll_top, scroll_bot;   // inclusive, 0-based
 
     uint32_t fg, bg;
@@ -183,6 +184,18 @@ static void put_char(term_t *t, uint32_t cp)
         linefeed(t);
     }
     term_cell_t *c = cell(t, t->cur_col, t->cur_row);
+
+    // Overwriting part of a double-width char must not leave the other half
+    // behind (zsh redraws its edit line in place; the halves overstrike).
+    if (c->ch == 0 && t->cur_col > 0) {            // we land on a continuation
+        term_cell_t *lead = cell(t, t->cur_col - 1, t->cur_row);
+        if (lead->ch && term_cp_width(lead->ch) == 2) lead->ch = ' ';
+    }
+    if (c->ch && term_cp_width(c->ch) == 2 && t->cur_col + 1 < t->cols) {
+        term_cell_t *cont = cell(t, t->cur_col + 1, t->cur_row);
+        if (cont->ch == 0 && w == 1) cont->ch = ' '; // narrow over a wide lead
+    }
+
     c->ch = cp;
     c->fg = (t->attrs & TERM_ATTR_REVERSE) ? t->bg : t->fg;
     c->bg = (t->attrs & TERM_ATTR_REVERSE) ? t->fg : t->bg;
@@ -273,7 +286,7 @@ static void do_mode(term_t *t, bool set)
             enter_alt(t, set);
             if (!set) { t->cur_col = t->saved_col; t->cur_row = t->saved_row; }
             break;
-        case 2004:                                        // bracketed paste
+        case 2004: t->bracketed_paste = set; break;       // bracketed paste
         case 1000: case 1002: case 1003: case 1006:       // mouse reporting
             break;                                        // accepted, unimplemented
         default:
@@ -537,6 +550,14 @@ const term_cell_t *term_row(term_t *t, int row) { return &t->grid[row * TERM_COL
 bool term_row_dirty(term_t *t, int row)         { return t->dirty[row]; }
 void term_clear_dirty(term_t *t)                { memset(t->dirty, 0, sizeof(t->dirty)); }
 bool term_alt_screen(term_t *t)                 { return t->alt_active; }
+
+bool term_bracketed_paste(term_t *t)
+{
+    xSemaphoreTake(t->mutex, portMAX_DELAY);
+    bool on = t->bracketed_paste;
+    xSemaphoreGive(t->mutex);
+    return on;
+}
 
 void term_cursor(term_t *t, int *col, int *row, bool *visible)
 {

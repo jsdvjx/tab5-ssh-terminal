@@ -125,6 +125,98 @@ def build_emoji():
     print(f"emoji24.bin: {len(entries)} emoji, {out.stat().st_size // 1024} KB")
 
 
+# OS / brand icon atlas. IDs MUST match settings.h target_os_t:
+#   0 SERVER (generic), 1 APPLE, 2 TUX(linux), 3 UBUNTU, 4 DEBIAN,
+#   5 WINDOWS, 6 RASPBERRY.
+# Colored Devicon "-original" SVG variants (MIT). Server (0) has no Devicon
+# logo, so we synthesize a flat 2-tone slate/teal rack glyph inline.
+DEVICON_RAW = "https://raw.githubusercontent.com/devicons/devicon/master/icons"
+OSICON_SOURCES = {
+    1: f"{DEVICON_RAW}/apple/apple-original.svg",
+    2: f"{DEVICON_RAW}/linux/linux-original.svg",
+    3: f"{DEVICON_RAW}/ubuntu/ubuntu-original.svg",
+    4: f"{DEVICON_RAW}/debian/debian-original.svg",
+    5: f"{DEVICON_RAW}/windows11/windows11-original.svg",
+    6: f"{DEVICON_RAW}/raspberrypi/raspberrypi-original.svg",
+}
+
+# Inline neutral colored server-rack glyph for id 0 (slate body, teal LEDs).
+SERVER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect x="20" y="16" width="88" height="32" rx="6" fill="#475569"/>
+  <rect x="20" y="56" width="88" height="32" rx="6" fill="#475569"/>
+  <rect x="20" y="96" width="88" height="20" rx="6" fill="#334155"/>
+  <circle cx="34" cy="32" r="5" fill="#2dd4bf"/>
+  <circle cx="50" cy="32" r="5" fill="#2dd4bf"/>
+  <circle cx="34" cy="72" r="5" fill="#2dd4bf"/>
+  <circle cx="50" cy="72" r="5" fill="#2dd4bf"/>
+  <rect x="74" y="27" width="24" height="10" rx="2" fill="#94a3b8"/>
+  <rect x="74" y="67" width="24" height="10" rx="2" fill="#94a3b8"/>
+</svg>
+"""
+
+
+def build_osicons():
+    from PIL import Image
+
+    dcache = CACHE / "devicon"
+    dcache.mkdir(parents=True, exist_ok=True)
+
+    # Collect SVG paths per id (download Devicon, write inline server glyph).
+    svgs = {}  # id -> Path
+    server_svg = dcache / "server-generic.svg"
+    server_svg.write_text(SERVER_SVG)
+    svgs[0] = server_svg
+    for oid, url in OSICON_SOURCES.items():
+        name = url.rsplit("/", 1)[-1]
+        dest = dcache / name
+        fetch(url, dest)
+        svgs[oid] = dest
+
+    ids = sorted(svgs)
+
+    def build_one(size):
+        out = OUT / f"osicons{size}.bin"
+        entries = []  # (id, argb_bytes)
+        for oid in ids:
+            png = dcache / f"{svgs[oid].stem}-{size}.png"
+            subprocess.run(["rsvg-convert", "-w", str(size), "-h", str(size),
+                            str(svgs[oid]), "-o", str(png)], check=True)
+            img = Image.open(png).convert("RGBA")
+            if img.size != (size, size):
+                img = img.resize((size, size), Image.LANCZOS)
+            raw = bytearray()
+            for r, g, b, a in img.getdata():
+                raw += struct.pack("<BBBB", b, g, r, a)  # LVGL ARGB8888 LE, straight alpha
+            entries.append((oid, bytes(raw)))
+        blob = size * size * 4
+        with open(out, "wb") as f:
+            f.write(b"OSI1")
+            f.write(struct.pack("<I", len(entries)))
+            off = 0
+            for oid, _ in entries:
+                f.write(struct.pack("<II", oid, off))
+                off += blob
+            for _, b in entries:
+                f.write(b)
+        print(f"osicons{size}.bin: {len(entries)} icons, {out.stat().st_size // 1024} KB")
+
+    build_one(64)
+    build_one(32)
+
+
+def build_pinyin_dict():
+    """dict_pinyin.dat for the ime_pinyin component (v2 uint32 format).
+
+    Rebuilds from the raw dictionary via the ime_host dictbuilder (which
+    compiles the components/ime_pinyin sources) for reproducibility.
+    """
+    out = OUT / "dict_pinyin.dat"
+    ime_host = ROOT / "tools" / "ime_host"
+    subprocess.run(["make", "build/dict_pinyin.dat"], cwd=ime_host, check=True)
+    out.write_bytes((ime_host / "build" / "dict_pinyin.dat").read_bytes())
+    print(f"dict_pinyin.dat: {out.stat().st_size // 1024} KB (v2 uint32 format)")
+
+
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     if which in ("all", "nerd"):
@@ -133,4 +225,8 @@ if __name__ == "__main__":
         build_cjk_full()
     if which in ("all", "emoji"):
         build_emoji()
+    if which in ("all", "osicons"):
+        build_osicons()
+    if which in ("all", "pinyin"):
+        build_pinyin_dict()
     print(f"\nasset pack ready: {OUT}\ncopy the 'tab5' folder to the SD card root")

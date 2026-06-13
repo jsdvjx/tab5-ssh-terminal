@@ -9,6 +9,8 @@ void hid_keyboard_start(term_t *t);
 // Where key bytes go: ssh_client_send() normally, setup_key_input() during
 // on-device setup. Default sink is ssh_client_send.
 typedef void (*hid_key_sink_t)(const uint8_t *data, size_t len);
+bool hid_keyboard_hw_present(void);
+
 void hid_keyboard_set_sink(hid_key_sink_t sink);
 
 // Translate one HID (usage, modifiers) press to terminal bytes and push to
@@ -16,7 +18,15 @@ void hid_keyboard_set_sink(hid_key_sink_t sink);
 // (which reports the same HID codes in HID mode).
 void hid_send_key(uint8_t usage, uint8_t modifiers);
 
+// Printable ASCII for a usage id (US layout, shift honored) — 0 if none.
+// Used by ui_home's SSH target editor to feed hardware keys to textareas.
+char hid_usage_to_ascii(uint8_t usage, uint8_t modifiers);
+
 // Local hotkey: Ctrl+Alt+P is swallowed (never sent to SSH) and triggers
 // this callback instead — used to toggle the side panel.
 typedef void (*hid_hotkey_cb_t)(void);
 void hid_keyboard_set_hotkey_cb(hid_hotkey_cb_t cb);
+
+// Local hotkey: Ctrl+Alt+T is swallowed and triggers this callback —
+// used to toggle the local shell (local_shell.c).
+void hid_keyboard_set_shell_cb(hid_hotkey_cb_t cb);

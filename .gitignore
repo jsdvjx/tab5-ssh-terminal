@@ -7,3 +7,9 @@ tools/.cache/
 .DS_Store
 *.pyc
 __pycache__/
+
+# host tooling: vendored clones, models, venvs (regenerable, large)
+tools/ime_host/libgooglepinyin/
+tools/voice_host/models/
+tools/voice_host/.venv/
+web/t5_site/

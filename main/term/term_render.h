@@ -11,6 +11,9 @@ extern "C" {
 // Call after bsp_display_start(). Takes the LVGL lock internally.
 void term_render_start(term_t *t);
 
+// Switch the renderer to another terminal (session tabs). Full redraw.
+void term_render_set_term(term_t *t);
+
 // Raw canvas pixels for the web screenshot endpoint (RGB565).
 // Returns NULL before term_render_start.
 const uint8_t *term_render_framebuffer(int *w, int *h, int *stride_bytes);

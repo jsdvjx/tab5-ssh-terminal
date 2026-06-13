@@ -31,7 +31,10 @@ extern "C" {
 #define TAB5_PANEL_W 424
 #define TERM_COLS_MAX   (1280 / TERM_CELL_W)
 #define TERM_COLS_PANEL ((1280 - TAB5_PANEL_W) / TERM_CELL_W)
-#define TERM_ROWS (720 / TERM_CELL_H)
+// The top of the screen hosts the status bar (status_bar.c): reserve at
+// least 24px, give the bar whatever the cell grid can't use anyway.
+#define TERM_ROWS ((720 - 24) / TERM_CELL_H)
+#define TAB5_STATUS_BAR_H (720 - TERM_ROWS * TERM_CELL_H)
 
 typedef struct {
     uint32_t ch;        // unicode codepoint (rendered subset: ASCII + CP437-ish)
@@ -78,6 +81,10 @@ void term_cursor(term_t *t, int *col, int *row, bool *visible);
 
 // True while the host app (vim, claude /tui fullscreen) is on the alt screen.
 bool term_alt_screen(term_t *t);
+
+// True while the host app enabled bracketed paste (DECSET 2004). IME commits
+// wrap multi-byte text in ESC[200~ .. ESC[201~ when this is on.
+bool term_bracketed_paste(term_t *t);
 
 // Keyboard helpers: arrow keys honor DECCKM (application cursor keys mode).
 // Returns escape sequence for the current mode into buf, returns length.

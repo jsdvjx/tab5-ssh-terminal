@@ -4,6 +4,7 @@
 #include "wifi.h"
 
 #include <string.h>
+#include <stdio.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -14,7 +15,8 @@
 #include "bsp/m5stack_tab5.h"
 #include "sdkconfig.h"
 
-#include "ui_panel.h"
+#include "rtc_rx8130.h"
+#include "ble_prov.h"
 
 static const char *TAG = "wifi";
 
@@ -26,11 +28,13 @@ static EventGroupHandle_t s_events;
 static esp_netif_t *s_netif;
 static int s_retries;
 static volatile bool s_want_connect;   // suppress auto-reconnect until creds set
+static volatile bool s_connected;      // true between GOT_IP and disconnect
 static char s_ssid[33];
 
 static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_connected = false;
         if (!s_want_connect) return;
         xEventGroupClearBits(s_events, CONNECTED_BIT);
         if (s_retries++ < MAX_RETRY) {
@@ -38,12 +42,18 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
             esp_wifi_connect();
         } else {
             xEventGroupSetBits(s_events, FAIL_BIT);
+            ble_prov_wifi_state(BLE_PROV_WIFI_FAIL, NULL);
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = data;
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&ev->ip_info.ip));
         s_retries = 0;
+        s_connected = true;
         xEventGroupSetBits(s_events, CONNECTED_BIT);
+        rtc_rx8130_sntp_start();    // idempotent; syncs clock + writes RTC
+        char ipbuf[20];
+        snprintf(ipbuf, sizeof(ipbuf), IPSTR, IP2STR(&ev->ip_info.ip));
+        ble_prov_wifi_state(BLE_PROV_WIFI_CONNECTED, ipbuf);
     }
 }
 
@@ -102,6 +112,7 @@ esp_err_t wifi_connect_blocking(const char *ssid, const char *password)
     xEventGroupClearBits(s_events, CONNECTED_BIT | FAIL_BIT);
     s_retries = 0;
     s_want_connect = true;
+    ble_prov_wifi_state(BLE_PROV_WIFI_CONNECTING, NULL);
 
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
     esp_wifi_disconnect();
@@ -118,6 +129,27 @@ esp_err_t wifi_connect_blocking(const char *ssid, const char *password)
     return ESP_FAIL;
 }
 
+// Background reconnect to the active pair (settings already updated + saved by
+// the caller on its internal-stack task). Mirrors app_main's ble_reconnect.
+static settings_t *s_reconn_cfg;
+static void reconnect_task(void *arg)
+{
+    if (s_reconn_cfg) {
+        wifi_connect_blocking(s_reconn_cfg->wifi_ssid, s_reconn_cfg->wifi_pass);
+    }
+    vTaskDelete(NULL);
+}
+
+void wifi_connect_saved_async(settings_t *s, int idx)
+{
+    if (!s || idx < 0 || idx >= s->n_wifi_nets) return;
+    strlcpy(s->wifi_ssid, s->wifi_nets[idx].ssid, sizeof(s->wifi_ssid));
+    strlcpy(s->wifi_pass, s->wifi_nets[idx].pass, sizeof(s->wifi_pass));
+    settings_save(s);             // caller runs on an internal stack (LVGL task)
+    s_reconn_cfg = s;
+    xTaskCreate(reconnect_task, "wifi_reconn", 4096, NULL, 4, NULL);
+}
+
 bool wifi_get_ip(char *buf, size_t len)
 {
     if (!s_netif) return false;
@@ -127,21 +159,12 @@ bool wifi_get_ip(char *buf, size_t len)
     return true;
 }
 
-static void status_task(void *arg)
+bool wifi_is_connected(void)
 {
-    while (true) {
-        wifi_ap_record_t ap;
-        char ip[20];
-        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK && wifi_get_ip(ip, sizeof(ip))) {
-            ui_panel_set_wifi((const char *)ap.ssid, ip, ap.rssi);
-        } else {
-            ui_panel_set_wifi(NULL, NULL, 0);
-        }
-        vTaskDelay(pdMS_TO_TICKS(5000));
-    }
+    return s_connected;
 }
 
+// The status bar and home panel poll esp_wifi themselves; nothing to push.
 void wifi_start_status_updates(void)
 {
-    xTaskCreate(status_task, "wifi_status", 4096, NULL, 3, NULL);
 }

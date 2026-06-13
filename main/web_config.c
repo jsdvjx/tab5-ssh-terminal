@@ -14,8 +14,15 @@
 #include "esp_system.h"
 #include "cJSON.h"
 
+#include "lvgl.h"
+
 #include "ssh_client.h"
 #include "term_render.h"
+#include "ui_home.h"
+#include "ime_filter.h"
+#include "power_mon.h"
+#include "power_mgmt.h"
+#include "voice_input.h"
 
 static const char *TAG = "web_config";
 
@@ -45,6 +52,7 @@ static esp_err_t targets_get(httpd_req_t *req)
         cJSON_AddNumberToObject(o, "port", t->port);
         cJSON_AddStringToObject(o, "user", t->user);
         cJSON_AddStringToObject(o, "cmd", t->cmd);
+        cJSON_AddNumberToObject(o, "os", s_cfg->target_os[i]);
         // password intentionally omitted
         cJSON_AddItemToArray(arr, o);
     }
@@ -105,6 +113,21 @@ static esp_err_t targets_post(httpd_req_t *req)
         strlcpy(t->cmd,  jstr(item, "cmd"),  sizeof(t->cmd));
         cJSON *port = cJSON_GetObjectItem(item, "port");
         t->port = (port && cJSON_IsNumber(port) && port->valueint > 0) ? port->valueint : 22;
+        cJSON *os = cJSON_GetObjectItem(item, "os");
+        if (os && cJSON_IsNumber(os) && os->valueint >= 0
+            && os->valueint < TARGET_OS_COUNT) {
+            s_cfg->target_os[n] = (uint8_t)os->valueint;
+        } else {
+            // older web UI without the field: keep the previous tag
+            s_cfg->target_os[n] = TARGET_OS_SERVER;
+            for (int i = 0; i < old.n_targets; i++) {
+                if (strcmp(old.targets[i].host, t->host) == 0 &&
+                    strcmp(old.targets[i].user, t->user) == 0) {
+                    s_cfg->target_os[n] = old.target_os[i];
+                    break;
+                }
+            }
+        }
 
         const char *pass = jstr(item, "pass");
         if (pass[0]) {
@@ -139,17 +162,45 @@ extern volatile uint32_t g_dbg_kbd_events, g_dbg_sink_bytes, g_dbg_ssh_rx,
 static esp_err_t debug_get(httpd_req_t *req)
 {
     extern size_t heap_caps_get_free_size(uint32_t caps);
-    char buf[320];
-    snprintf(buf, sizeof(buf),
+    char buf[768];
+    int len = snprintf(buf, sizeof(buf),
              "{\"kbd_events\":%lu,\"sink_bytes\":%lu,\"ssh_rx\":%lu,"
              "\"ssh_tx\":%lu,\"ssh_loops\":%lu,\"term_feed\":%lu,"
-             "\"render_ticks\":%lu,\"free_int\":%u,\"free_psram\":%u}",
+             "\"render_ticks\":%lu,\"free_int\":%u,\"free_psram\":%u",
              (unsigned long)g_dbg_kbd_events, (unsigned long)g_dbg_sink_bytes,
              (unsigned long)g_dbg_ssh_rx, (unsigned long)g_dbg_ssh_tx,
              (unsigned long)g_dbg_ssh_loops, (unsigned long)g_dbg_term_feed,
              (unsigned long)g_dbg_render_ticks,
              (unsigned)heap_caps_get_free_size(1 << 11),
              (unsigned)heap_caps_get_free_size(1 << 10));
+    float bv, bma, bmw;
+    if (power_mon_get_ext(&bv, &bma, &bmw, NULL)) {
+        len += snprintf(buf + len, sizeof(buf) - len,
+                        ",\"batt_v\":%.3f,\"batt_ma\":%.1f,\"batt_mw\":%.1f",
+                        bv, bma, bmw);
+    }
+    len += snprintf(buf + len, sizeof(buf) - len,
+                    ",\"screen\":\"%s\",\"idle_s\":%lu",
+                    power_mgmt_screen_on() ? "on" : (power_mgmt_locked() ? "locked" : "off"),
+                    (unsigned long)power_mgmt_idle_s());
+
+    // Session tabs: observable state machine for remote verification.
+    static const char *state_names[] = { "idle", "connecting", "connected" };
+    len += snprintf(buf + len, sizeof(buf) - len, ",\"active\":%d,\"sessions\":[",
+                    ssh_active());
+    bool first = true;
+    for (int id = 0; id < MAX_SSH_SESSIONS; id++) {
+        char name[48];
+        int tgt;
+        ssh_state_t st = ssh_state(id, name, sizeof(name), &tgt);
+        if (tgt < 0) continue;
+        len += snprintf(buf + len, sizeof(buf) - len,
+                        "%s{\"id\":%d,\"target\":%d,\"name\":\"%s\",\"state\":\"%s\"}",
+                        first ? "" : ",", id, tgt, name, state_names[st]);
+        first = false;
+    }
+    len += snprintf(buf + len, sizeof(buf) - len, "]");
+    snprintf(buf + len, sizeof(buf) - len, "}");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, buf);
 }
@@ -209,6 +260,64 @@ static esp_err_t sdput_post(httpd_req_t *req)
     return httpd_resp_sendstr(req, msg);
 }
 
+// GET /api/ime?py=nihao — pinyin IME debug: run a throwaway engine query
+// and return the first candidates. Remote verification without a keyboard.
+static esp_err_t ime_get(httpd_req_t *req)
+{
+    char query[80] = {0}, py[40] = {0};
+    httpd_req_get_url_query_str(req, query, sizeof(query));
+    if (httpd_query_key_value(query, "py", py, sizeof(py)) != ESP_OK || !py[0]) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing py");
+    }
+
+    static char cands[10][64];      // httpd task only; serialized by httpd
+    int n = ime_filter_debug_query(py, cands, 10);
+    if (n < 0) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "ime unavailable");
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "pinyin", py);
+    cJSON *arr = cJSON_AddArrayToObject(root, "cands");
+    for (int i = 0; i < n; i++) {
+        cJSON_AddItemToArray(arr, cJSON_CreateString(cands[i]));
+    }
+    char *out = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+    free(out);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+// DEV-ONLY (temporary, pending the deferred HTTP-control design):
+// POST /api/rec?ms=3000 — record N ms from the ES7210 mics and return the
+// 16k/16-bit/mono WAV. Lets the mic chain be verified remotely without
+// touching the device. Remove once voice input is trusted.
+static esp_err_t rec_post(httpd_req_t *req)
+{
+    char query[32] = {0}, val[12] = {0};
+    int ms = 3000;
+    httpd_req_get_url_query_str(req, query, sizeof(query));
+    if (httpd_query_key_value(query, "ms", val, sizeof(val)) == ESP_OK) {
+        ms = atoi(val);
+    }
+    if (ms < 100) ms = 100;
+    if (ms > 15000) ms = 15000;
+
+    uint8_t *wav = NULL;
+    size_t len = 0;
+    if (!voice_input_record_wav(ms, &wav, &len)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "mic unavailable or busy");
+    }
+    httpd_resp_set_type(req, "audio/wav");
+    esp_err_t err = httpd_resp_send(req, (const char *)wav, len);
+    free(wav);
+    return err;
+}
+
 static esp_err_t reboot_post(httpd_req_t *req)
 {
     httpd_resp_sendstr(req, "rebooting");
@@ -217,14 +326,10 @@ static esp_err_t reboot_post(httpd_req_t *req)
     return ESP_OK;
 }
 
-// GET /shot — terminal canvas as a 24-bit BMP (debugging the renderer
-// remotely; tearing is possible since the canvas keeps refreshing).
-static esp_err_t shot_get(httpd_req_t *req)
+// Stream an RGB565 pixel buffer as a 24-bit BMP.
+static esp_err_t send_bmp_rgb565(httpd_req_t *req, const uint8_t *fb,
+                                 int w, int h, int stride)
 {
-    int w, h, stride;
-    const uint8_t *fb = term_render_framebuffer(&w, &h, &stride);
-    if (!fb) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no fb");
-
     int rowbytes = w * 3;                      // 24bpp rows; w*3 keeps 4-byte align for our sizes
     uint32_t imgsize = rowbytes * h;
     uint8_t hdr[54] = { 'B', 'M' };
@@ -258,6 +363,86 @@ static esp_err_t shot_get(httpd_req_t *req)
     return ESP_OK;
 }
 
+// GET /shot — terminal canvas as a 24-bit BMP (debugging the renderer
+// remotely; tearing is possible since the canvas keeps refreshing).
+//
+// GET /shot?full=1 — whole LVGL screen via lv_snapshot (status bar, home
+// panel, ...). Top-layer overlays (sleep overlay) are not captured:
+// lv_snapshot_take renders one object tree and the panel lives on the
+// active screen, which is what we need to review.
+//
+// UI-DEV HELPER: &panel=1 / &panel=0 force the home panel open/closed
+// before the snapshot — Ctrl+Alt+P can't be pressed remotely.
+static esp_err_t shot_get(httpd_req_t *req)
+{
+    char query[64] = {0}, val[8] = {0};
+    httpd_req_get_url_query_str(req, query, sizeof(query));
+
+    if (httpd_query_key_value(query, "panel", val, sizeof(val)) == ESP_OK) {
+        ui_home_set_open(val[0] == '1');
+        vTaskDelay(pdMS_TO_TICKS(300));        // let the LVGL task lay it out
+    }
+
+    // UI-DEV HELPER: &lang=0|1 forces the UI language (0 = 中文, 1 = English)
+    // and live-rebuilds the panel before the snapshot. Snapshot-only; does not
+    // persist to settings.lang.
+    if (httpd_query_key_value(query, "lang", val, sizeof(val)) == ESP_OK) {
+        ui_home_set_lang_dev(val[0] - '0');
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+
+    // UI-DEV HELPER: &edit=1 opens the SSH target editor list, &edit=2 the
+    // blank add-target form (opens the panel itself if needed), &edit=0
+    // back to the card grid.
+    if (httpd_query_key_value(query, "edit", val, sizeof(val)) == ESP_OK) {
+        ui_home_set_edit_view(val[0] - '0');
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+    // UI-DEV HELPER: &sheet=<n> opens the device action sheet for target n.
+    if (httpd_query_key_value(query, "sheet", val, sizeof(val)) == ESP_OK) {
+        ui_home_show_sheet(val[0] - '0');
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+    // UI-DEV HELPER: &keys=1 opens the SSH key panel (over the expanded SSH
+    // app), &keys=0 backs out to the SSH app.
+    if (httpd_query_key_value(query, "keys", val, sizeof(val)) == ESP_OK) {
+        ui_home_set_keys_view(val[0] - '0');
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+    // UI-DEV HELPER: &conn=1 expanded 连接 app, &conn=2 添加网络 form, &conn=0
+    // back to the card grid.
+    if (httpd_query_key_value(query, "conn", val, sizeof(val)) == ESP_OK) {
+        ui_home_set_conn_view(val[0] - '0');
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+
+    bool full = httpd_query_key_value(query, "full", val, sizeof(val)) == ESP_OK
+                && val[0] == '1';
+    if (!full) {
+        int w, h, stride;
+        const uint8_t *fb = term_render_framebuffer(&w, &h, &stride);
+        if (!fb) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no fb");
+        return send_bmp_rgb565(req, fb, w, h, stride);
+    }
+
+    bsp_display_lock(0);
+    lv_draw_buf_t *snap = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);
+    bsp_display_unlock();
+    if (!snap) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "snapshot failed");
+
+    esp_err_t err = send_bmp_rgb565(req, snap->data, snap->header.w,
+                                    snap->header.h, snap->header.stride);
+    bsp_display_lock(0);
+    lv_draw_buf_destroy(snap);
+    bsp_display_unlock();
+    return err;
+}
+
+// POST /api/connect {"index":n} — open-or-switch to a session on target n.
+// With session tabs this opens a NEW session (or switches to an existing one
+// for the same target) instead of retargeting the active session: the web UI
+// button reads "connect", and dropping someone's live session to do it would
+// be the more surprising behavior.
 static esp_err_t connect_post(httpd_req_t *req)
 {
     char body[64];
@@ -279,7 +464,8 @@ void web_config_start(settings_t *s, void (*on_update)(void))
     s_on_update = on_update;
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.stack_size = 8192;
+    cfg.stack_size = 12288;     // /shot?full=1 renders LVGL on this stack
+    cfg.max_uri_handlers = 16;
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "httpd start failed");
@@ -292,8 +478,10 @@ void web_config_start(settings_t *s, void (*on_update)(void))
         { .uri = "/api/connect", .method = HTTP_POST, .handler = connect_post },
         { .uri = "/shot",        .method = HTTP_GET,  .handler = shot_get },
         { .uri = "/debug",       .method = HTTP_GET,  .handler = debug_get },
+        { .uri = "/api/ime",     .method = HTTP_GET,  .handler = ime_get },
         { .uri = "/api/reboot",  .method = HTTP_POST, .handler = reboot_post },
         { .uri = "/api/sdput",   .method = HTTP_POST, .handler = sdput_post },
+        { .uri = "/api/rec",     .method = HTTP_POST, .handler = rec_post },   // DEV-ONLY mic check
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         httpd_register_uri_handler(server, &routes[i]);

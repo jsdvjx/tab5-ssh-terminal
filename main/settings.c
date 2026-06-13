@@ -1,6 +1,7 @@
 #include "settings.h"
 
 #include <string.h>
+#include <stddef.h>
 
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -14,6 +15,9 @@ static const char *TAG = "settings";
 static void seed_defaults(settings_t *s)
 {
     memset(s, 0, sizeof(*s));
+    s->sleep_timeout_s = 180;   // PM_IDLE_TIMEOUT_S; 0 = never sleep
+    strlcpy(s->voice_url, "http://192.168.2.165:8765/inference",
+            sizeof(s->voice_url));
     strlcpy(s->wifi_ssid, CONFIG_TAB5_WIFI_SSID, sizeof(s->wifi_ssid));
     strlcpy(s->wifi_pass, CONFIG_TAB5_WIFI_PASSWORD, sizeof(s->wifi_pass));
     if (strlen(CONFIG_TAB5_SSH_HOST) > 0 && strcmp(CONFIG_TAB5_SSH_HOST, "192.168.1.100") != 0) {
@@ -41,7 +45,10 @@ bool settings_load(settings_t *s)
     esp_err_t err = nvs_get_blob(h, KEY_BLOB, s, &len);
     nvs_close(h);
 
-    if (err != ESP_OK || len != sizeof(*s)) {
+    // Accept older (shorter) blobs: nvs_get_blob only overwrites the first
+    // `len` bytes, so fields appended since (sleep_timeout_s) keep their
+    // seeded defaults. Oversized/failed reads fall back to defaults.
+    if (err != ESP_OK || len > sizeof(*s) || len < offsetof(settings_t, sleep_timeout_s)) {
         ESP_LOGI(TAG, "no saved config (err=%d len=%u), using defaults", err, (unsigned)len);
         seed_defaults(s);   // partial read protection
         return false;
@@ -49,7 +56,31 @@ bool settings_load(settings_t *s)
     if (s->n_targets < 0) s->n_targets = 0;
     if (s->n_targets > MAX_SSH_TARGETS) s->n_targets = MAX_SSH_TARGETS;
     if (s->last_target < 0 || s->last_target >= s->n_targets) s->last_target = 0;
-    ESP_LOGI(TAG, "loaded: wifi='%s' targets=%d", s->wifi_ssid, s->n_targets);
+    // Blob predating voice_url (or saved with it empty): keep the default.
+    s->voice_url[sizeof(s->voice_url) - 1] = 0;
+    if (!s->voice_url[0]) {
+        strlcpy(s->voice_url, "http://192.168.2.165:8765/inference",
+                sizeof(s->voice_url));
+    }
+    // Blob predating target_os[] keeps the seeded zeros (= generic server);
+    // clamp anything out of range from a future/corrupt blob.
+    for (int i = 0; i < MAX_SSH_TARGETS; i++) {
+        if (s->target_os[i] >= TARGET_OS_COUNT) s->target_os[i] = TARGET_OS_SERVER;
+        if (s->target_auth[i] >= TARGET_AUTH_COUNT) s->target_auth[i] = TARGET_AUTH_AUTO;
+    }
+    // Saved Wi-Fi networks: clamp the count, then migrate the legacy single
+    // wifi_ssid/wifi_pass into wifi_nets[0] so the user's current network
+    // survives the upgrade and appears in 已存网络.
+    if (s->n_wifi_nets < 0) s->n_wifi_nets = 0;
+    if (s->n_wifi_nets > MAX_WIFI_NETS) s->n_wifi_nets = MAX_WIFI_NETS;
+    if (s->n_wifi_nets == 0 && s->wifi_ssid[0]) {
+        strlcpy(s->wifi_nets[0].ssid, s->wifi_ssid, sizeof(s->wifi_nets[0].ssid));
+        strlcpy(s->wifi_nets[0].pass, s->wifi_pass, sizeof(s->wifi_nets[0].pass));
+        s->n_wifi_nets = 1;
+        ESP_LOGI(TAG, "migrated legacy wifi '%s' -> wifi_nets[0]", s->wifi_ssid);
+    }
+    ESP_LOGI(TAG, "loaded: wifi='%s' targets=%d nets=%d ble=%d",
+             s->wifi_ssid, s->n_targets, s->n_wifi_nets, s->ble_enabled);
     return true;
 }
 

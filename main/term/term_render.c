@@ -415,6 +415,19 @@ static void refresh_cb(lv_timer_t *timer)
     }
 }
 
+// Point the renderer at another term_t (session switch). Full redraw; the
+// 33ms timer continues dirty-row tracking on the new terminal.
+void term_render_set_term(term_t *t)
+{
+    if (!t || t == s_term) return;
+    bsp_display_lock(0);        // refresh_cb runs in the LVGL task
+    s_term = t;
+    s_last_cur_col = -1;
+    s_last_cur_row = -1;
+    bsp_display_unlock();
+    term_redraw(t);
+}
+
 const uint8_t *term_render_framebuffer(int *w, int *h, int *stride_bytes)
 {
     if (!s_canvas) return NULL;
@@ -444,7 +457,7 @@ void term_render_start(term_t *t)
     s_canvas = lv_canvas_create(lv_screen_active());
     lv_canvas_set_buffer(s_canvas, s_canvas_buf, SCREEN_W, SCREEN_H,
                          LV_COLOR_FORMAT_RGB565);
-    lv_obj_set_pos(s_canvas, 0, 0);
+    lv_obj_set_pos(s_canvas, 0, TAB5_STATUS_BAR_H);   // status bar above
     lv_canvas_fill_bg(s_canvas, lv_color_hex(0x101010), LV_OPA_COVER);
     lv_timer_create(refresh_cb, REFRESH_MS, NULL);
     bsp_display_unlock();

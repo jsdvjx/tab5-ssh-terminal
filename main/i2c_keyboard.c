@@ -8,6 +8,8 @@
 // forwarded to hid_send_key(). Polled every 20ms; INT (G50) is not required.
 
 #include "i2c_keyboard.h"
+
+static volatile bool s_present;
 #include "hid_keyboard.h"
 
 #include "freertos/FreeRTOS.h"
@@ -96,6 +98,12 @@ void i2c_keyboard_start(void)
         return;
     }
     ESP_LOGI(TAG, "Tab5 Keyboard ready (fw v%u, HID mode)", fw);
+    s_present = true;
 
     xTaskCreate(kbd_task, "i2c_kbd", 4096, NULL, 5, NULL);
+}
+
+bool i2c_keyboard_present(void)
+{
+    return s_present;
 }
