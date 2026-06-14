@@ -70,6 +70,12 @@ typedef struct {
     uint8_t lang;                         // UI language (lang_t); default 0 =
                                           // LANG_ZH. Appended last: old blobs
                                           // (shorter reads) keep the seeded 0.
+    // T5NAT reverse-tunnel (main/nat_tunnel.c). Appended after lang; old blobs
+    // (shorter reads) keep the seeded defaults below — same tail-seed pattern.
+    bool nat_enabled;                     // dial the relay on boot; default OFF
+    char nat_url[80];                     // relay WSS endpoint; default below
+    char nat_token[48];                   // device auth token (opaque)
+    char nat_sub[32];                     // desired subdomain label
 } settings_t;
 
 // Loads from NVS. Returns true if a saved config existed; on first boot the

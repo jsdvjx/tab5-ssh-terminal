@@ -74,6 +74,11 @@ typedef enum {
     T_LANGUAGE,         // 语言
     T_LANG_ZH,          // 中文 (toggle option label)
     T_LANG_EN,          // English (toggle option label)
+    T_PIN,              // PIN
+    T_REGEN_PIN,        // 重新生成PIN / New PIN
+    T_TUNNEL,           // 穿透 / Tunnel (reverse tunnel control)
+    T_TUNNEL_OFF,       // 未启用 / Off
+    T_TUNNEL_CONNECTING,// 连接中 / Connecting (tunnel-specific, ASCII-safe EN)
     T_COUNT,
 } str_id_t;
 

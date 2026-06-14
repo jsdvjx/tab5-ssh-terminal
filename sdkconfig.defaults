@@ -66,6 +66,12 @@ CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256
 # Task table for the local shell `ps` command
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 
+# T5NAT reverse tunnel (main/nat_tunnel.c): the device proxies relayed TCP
+# streams to its own services on 127.0.0.1, which needs lwIP loopback. More
+# sockets too: httpd + websocket + up to MAX_STREAMS(8) loopback pairs.
+CONFIG_LWIP_NETIF_LOOPBACK=y
+CONFIG_LWIP_MAX_SOCKETS=16
+
 # Full-screen home panel (main/ui_home.c): bigger montserrat sizes for the
 # wordmark/clock, and lv_snapshot for GET /shot?full=1 remote UI review.
 CONFIG_LV_FONT_MONTSERRAT_20=y

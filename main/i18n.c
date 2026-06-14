@@ -59,10 +59,15 @@ static const char *S[LANG_COUNT][T_COUNT] = {
         [T_PUBKEY_HINT_COPY]  = "复制或",
         [T_PUBKEY_HINT_RUN]   = "执行",
         [T_PRIVKEY_HINT]      = "自定义私钥通过蓝牙上传",
-        [T_WIFI_NOT_CONNECTED]= "Wi-Fi 未连接，请先连接网络",
+        [T_WIFI_NOT_CONNECTED]= "网络未连接，请先连接网络",
         [T_LANGUAGE]          = "语言",
         [T_LANG_ZH]           = "中文",
         [T_LANG_EN]           = "English",
+        [T_PIN]               = "PIN",
+        [T_REGEN_PIN]         = "重新生成",
+        [T_TUNNEL]            = "穿透",
+        [T_TUNNEL_OFF]        = "未启用",
+        [T_TUNNEL_CONNECTING] = "连接中",
     },
     [LANG_EN] = {
         [T_SSH_SESSIONS]      = "Sessions",
@@ -122,6 +127,11 @@ static const char *S[LANG_COUNT][T_COUNT] = {
         [T_LANGUAGE]          = "Language",
         [T_LANG_ZH]           = "中文",
         [T_LANG_EN]           = "English",
+        [T_PIN]               = "PIN",
+        [T_REGEN_PIN]         = "New PIN",
+        [T_TUNNEL]            = "Tunnel",
+        [T_TUNNEL_OFF]        = "Off",
+        [T_TUNNEL_CONNECTING] = "Connecting",
     },
 };
 

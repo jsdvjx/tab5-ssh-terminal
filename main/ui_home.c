@@ -51,8 +51,10 @@
 #include "power_mon.h"
 #include "ssh_client.h"
 #include "ssh_keys.h"
+#include "security.h"
 #include "status_bar.h"
 #include "wifi.h"
+#include "nat_tunnel.h"
 
 LV_FONT_DECLARE(cjk24);     // flash fallback when no SD cjkfull24.bin
 LV_FONT_DECLARE(nerd32);    // nerd-font icon subset, 32 px (dock, OS picker)
@@ -169,7 +171,12 @@ static lv_obj_t *s_wifiadd_ssid;
 static lv_obj_t *s_wifiadd_pass;
 static lv_obj_t *s_wifiadd_kb;
 static lv_obj_t *s_sys_label;
+static lv_obj_t *s_pin_label;            // "PIN: XXXXXXXX" on the 系统 card
+static lv_obj_t *s_pin_regen_lbl;        // regen button label (two-tap confirm)
+static bool      s_pin_regen_armed;
 static lv_obj_t *s_bright_value;
+static lv_obj_t *s_nat_sw;               // 穿透/Tunnel enable switch (系统 card)
+static lv_obj_t *s_nat_status;           // assigned URL / 未启用 / 连接中
 
 // ----- views: grid / one expanded app / SSH target form / SSH key panel -----
 typedef enum { VIEW_GRID, VIEW_APP, VIEW_FORM, VIEW_KEYS, VIEW_WIFIADD } home_view_t;
@@ -220,6 +227,7 @@ static void refresh_targets(void);
 static void apply_view(void);
 static bool ssh_connect_allowed(void);
 static void ui_home_rebuild(void);
+static void refresh_nat(void);
 
 // Language segmented toggle (Display card): two buttons 中文 / English.
 static lv_obj_t *s_lang_btn[LANG_COUNT];
@@ -1099,8 +1107,52 @@ static void refresh_keys(void)
     }
 }
 
+static void pin_regen_reset(void)
+{
+    s_pin_regen_armed = false;
+    if (s_pin_regen_lbl) {
+        lv_label_set_text(s_pin_regen_lbl, T(T_REGEN_PIN));
+        lv_obj_set_style_text_font(s_pin_regen_lbl, font_for(T(T_REGEN_PIN)), 0);
+    }
+}
+
+static void pin_regen_cb(lv_event_t *e)   // two-tap confirm -> new PIN
+{
+    (void)e;
+    if (!s_pin_regen_armed) {
+        s_pin_regen_armed = true;
+        lv_label_set_text(s_pin_regen_lbl, T(T_CONFIRM_REGEN));
+        lv_obj_set_style_text_font(s_pin_regen_lbl, font_for(T(T_CONFIRM_REGEN)), 0);
+        return;
+    }
+    security_regen_pin();
+    if (s_pin_label) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "PIN: %s", security_pin());
+        lv_label_set_text(s_pin_label, buf);
+    }
+    pin_regen_reset();
+}
+
+// 穿透/Tunnel enable switch: persists nat_enabled and starts/stops the dialer.
+// settings_save runs on the LVGL task (internal stack) so the NVS write is safe.
+static void nat_sw_cb(lv_event_t *e)
+{
+    bool en = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    s_cfg->nat_enabled = en;
+    settings_save(s_cfg);
+    if (en) nat_tunnel_start();
+    else    nat_tunnel_stop();
+    refresh_nat();
+}
+
 static void refresh_sys(void)
 {
+    if (s_pin_label) {
+        char pbuf[24];
+        snprintf(pbuf, sizeof(pbuf), "PIN: %s", security_pin());
+        lv_label_set_text(s_pin_label, pbuf);
+    }
     const esp_app_desc_t *d = esp_app_get_description();
     uint64_t up = esp_timer_get_time() / 1000000ULL;
     float c = 0;
@@ -1118,6 +1170,25 @@ static void refresh_sys(void)
     lv_label_set_text(s_sys_label, buf);
 }
 
+// 穿透/Tunnel status line on the 系统 card: connected -> the assigned public
+// host (ASCII, montserrat); enabled-but-not-yet -> 连接中; off -> 未启用.
+// NOTE: the host is ASCII so it never mixes scripts with the CJK status words.
+static void refresh_nat(void)
+{
+    if (!s_nat_status) return;
+    char host[64];
+    const char *txt;
+    if (s_cfg->nat_enabled && nat_tunnel_status(host, sizeof(host)) && host[0]) {
+        txt = host;
+    } else if (s_cfg->nat_enabled) {
+        txt = T(T_TUNNEL_CONNECTING);
+    } else {
+        txt = T(T_TUNNEL_OFF);
+    }
+    lv_label_set_text(s_nat_status, txt);
+    lv_obj_set_style_text_font(s_nat_status, font_for(txt), 0);
+}
+
 // Runs in the LVGL task while the panel is open: clock every second, the
 // slower sources every 5th tick (status_bar.c cadence).
 static void tick_cb(lv_timer_t *timer)
@@ -1130,6 +1201,7 @@ static void tick_cb(lv_timer_t *timer)
         refresh_wifi();
         refresh_ble();
         refresh_sys();
+        refresh_nat();
     }
     refresh_keys();   // no-op unless the key panel is showing
 }
@@ -1142,6 +1214,7 @@ static void refresh_all(void)
     refresh_wifi();
     refresh_ble();
     refresh_sys();
+    refresh_nat();
 }
 
 // ------------------------------------------------------- device tile grid
@@ -2576,6 +2649,48 @@ static void build_home(void)
     mk_title(card, NULL, T(T_SYSTEM), 0xffffff);
     s_sys_label = mk_body(card, "...", 0xffffff, 44);
     lv_obj_set_style_text_line_space(s_sys_label, 8, 0);
+
+    // Device PIN (gates web + BLE) + two-tap regenerate button.
+    char pbuf[24];
+    snprintf(pbuf, sizeof(pbuf), "PIN: %s", security_pin());
+    s_pin_label = mk_body(card, pbuf, 0xffe9c2, 150);
+    lv_obj_t *rb = lv_button_create(card);
+    lv_obj_set_size(rb, 180, 44);
+    lv_obj_set_pos(rb, 0, 182);
+    lv_obj_set_style_radius(rb, 14, 0);
+    lv_obj_set_style_shadow_width(rb, 0, 0);
+    lv_obj_set_style_bg_color(rb, lv_color_hex(COL_NAVY), 0);
+    lv_obj_add_event_cb(rb, pin_regen_cb, LV_EVENT_CLICKED, NULL);
+    s_pin_regen_lbl = lv_label_create(rb);
+    lv_label_set_text(s_pin_regen_lbl, T(T_REGEN_PIN));
+    lv_obj_set_style_text_font(s_pin_regen_lbl, font_for(T(T_REGEN_PIN)), 0);
+    lv_obj_set_style_text_color(s_pin_regen_lbl, lv_color_hex(0xffffff), 0);
+    lv_obj_center(s_pin_regen_lbl);
+    s_pin_regen_armed = false;
+
+    // ----- 穿透/Tunnel: enable switch + assigned-URL status line.
+    // Reverse tunnel exposes this device's port 80 at a public subdomain.
+    lv_obj_t *natl = lv_label_create(card);
+    lv_label_set_text(natl, T(T_TUNNEL));
+    lv_obj_set_style_text_font(natl, font_for(T(T_TUNNEL)), 0);
+    lv_obj_set_style_text_color(natl, lv_color_hex(0xffffff), 0);
+    lv_obj_set_pos(natl, 0, 244);
+
+    s_nat_sw = lv_switch_create(card);
+    lv_obj_set_size(s_nat_sw, 72, 38);
+    lv_obj_set_pos(s_nat_sw, 108, 240);
+    lv_obj_set_style_bg_color(s_nat_sw, lv_color_hex(COL_NAVY), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    if (s_cfg->nat_enabled) lv_obj_add_state(s_nat_sw, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(s_nat_sw, nat_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // Status line: assigned public host (ASCII) / 连接中 / 未启用.
+    s_nat_status = lv_label_create(card);
+    lv_label_set_text(s_nat_status, T(T_TUNNEL_OFF));
+    lv_obj_set_style_text_font(s_nat_status, font_for(T(T_TUNNEL_OFF)), 0);
+    lv_obj_set_style_text_color(s_nat_status, lv_color_hex(0xffe9c2), 0);
+    lv_label_set_long_mode(s_nat_status, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(s_nat_status, CARD_W - 40);
+    lv_obj_set_pos(s_nat_status, 0, 286);
 
     // ----- card 6: 输入法 (green)
     card = mk_card(APP_IME);

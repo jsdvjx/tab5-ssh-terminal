@@ -18,6 +18,9 @@ static void seed_defaults(settings_t *s)
     s->sleep_timeout_s = 180;   // PM_IDLE_TIMEOUT_S; 0 = never sleep
     strlcpy(s->voice_url, "http://192.168.2.165:8765/inference",
             sizeof(s->voice_url));
+    // T5NAT reverse tunnel: off by default, dials the public relay when on.
+    s->nat_enabled = false;
+    strlcpy(s->nat_url, "wss://t5.cc.hn/nat", sizeof(s->nat_url));
     strlcpy(s->wifi_ssid, CONFIG_TAB5_WIFI_SSID, sizeof(s->wifi_ssid));
     strlcpy(s->wifi_pass, CONFIG_TAB5_WIFI_PASSWORD, sizeof(s->wifi_pass));
     if (strlen(CONFIG_TAB5_SSH_HOST) > 0 && strcmp(CONFIG_TAB5_SSH_HOST, "192.168.1.100") != 0) {
@@ -78,6 +81,14 @@ bool settings_load(settings_t *s)
         strlcpy(s->wifi_nets[0].pass, s->wifi_pass, sizeof(s->wifi_nets[0].pass));
         s->n_wifi_nets = 1;
         ESP_LOGI(TAG, "migrated legacy wifi '%s' -> wifi_nets[0]", s->wifi_ssid);
+    }
+    // Blob predating the nat_* tail (shorter read) keeps the seeded defaults,
+    // but a blob saved with an empty nat_url should still get the default.
+    s->nat_url[sizeof(s->nat_url) - 1] = 0;
+    s->nat_token[sizeof(s->nat_token) - 1] = 0;
+    s->nat_sub[sizeof(s->nat_sub) - 1] = 0;
+    if (!s->nat_url[0]) {
+        strlcpy(s->nat_url, "wss://t5.cc.hn/nat", sizeof(s->nat_url));
     }
     ESP_LOGI(TAG, "loaded: wifi='%s' targets=%d nets=%d ble=%d",
              s->wifi_ssid, s->n_targets, s->n_wifi_nets, s->ble_enabled);

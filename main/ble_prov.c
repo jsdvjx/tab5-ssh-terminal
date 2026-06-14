@@ -51,6 +51,7 @@ void ble_prov_wifi_state(ble_prov_wifi_state_t st, const char *ip)
 
 #include "ssh_keys.h"
 #include "wifi.h"
+#include "security.h"
 
 #define DEVICE_NAME        "Tab5-SSH"
 #define PREFERRED_MTU      256
@@ -72,6 +73,7 @@ static const ble_uuid128_t UUID_SCAN   = PROV_UUID(0x0002);
 static const ble_uuid128_t UUID_CREDS  = PROV_UUID(0x0003);
 static const ble_uuid128_t UUID_STATUS = PROV_UUID(0x0004);
 static const ble_uuid128_t UUID_KEY    = PROV_UUID(0x0005);
+static const ble_uuid128_t UUID_AUTH   = PROV_UUID(0x0006);
 
 static settings_t *s_settings;
 static void (*s_creds_cb)(void);
@@ -80,6 +82,10 @@ static bool     s_ready;                      // stack came up
 static bool     s_enabled = false;            // master on/off (settings.ble_enabled); default OFF
 static bool     s_should_advertise;           // desired advertising state
 static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
+// Per-connection PIN auth: the conn_handle that wrote the correct PIN to
+// UUID_AUTH. Sensitive writes (creds, key) require this == the writer's
+// conn_handle. Cleared on disconnect. SCAN/STATUS stay open.
+static uint16_t s_authed_conn = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_scan_val_handle;
 static uint16_t s_status_val_handle;
 static uint8_t  s_own_addr_type;
@@ -283,6 +289,37 @@ static int handle_key_write(struct os_mbuf *om)
     return 0;
 }
 
+// ------------------------------------------------------------------ auth
+// The client writes the 8-char device PIN to UUID_AUTH. On a match THIS
+// connection (conn_handle) is marked authenticated; creds + key writes are
+// rejected until then and the authentication is dropped on disconnect.
+
+static int handle_auth_write(uint16_t conn_handle, struct os_mbuf *om)
+{
+    char buf[32];
+    uint16_t len = 0;
+    if (ble_hs_mbuf_to_flat(om, buf, sizeof(buf) - 1, &len) != 0) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    buf[len] = 0;
+    if (!security_check(buf)) {
+        s_authed_conn = BLE_HS_CONN_HANDLE_NONE;
+        if (s_conn == conn_handle) {
+            struct os_mbuf *m = ble_hs_mbuf_from_flat("{\"err\":\"auth\"}", 14);
+            if (m) ble_gatts_notify_custom(s_conn, s_status_val_handle, m);
+        }
+        ESP_LOGW(TAG, "BLE auth failed");
+        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+    }
+    s_authed_conn = conn_handle;
+    ESP_LOGI(TAG, "BLE connection authenticated");
+    if (s_conn == conn_handle) {
+        struct os_mbuf *m = ble_hs_mbuf_from_flat("{\"auth\":\"ok\"}", 13);
+        if (m) ble_gatts_notify_custom(s_conn, s_status_val_handle, m);
+    }
+    return 0;
+}
+
 // ------------------------------------------------------------------ gatt
 
 static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
@@ -316,10 +353,23 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                        ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
         }
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        if (ble_uuid_cmp(uuid, &UUID_AUTH.u) == 0) {
+            return handle_auth_write(conn_handle, ctxt->om);
+        }
+        // Sensitive writes require this connection to be PIN-authenticated.
+        bool authed = (s_authed_conn != BLE_HS_CONN_HANDLE_NONE
+                       && s_authed_conn == conn_handle);
         if (ble_uuid_cmp(uuid, &UUID_CREDS.u) == 0) {
+            if (!authed) {
+                struct os_mbuf *m = ble_hs_mbuf_from_flat("{\"err\":\"auth\"}", 14);
+                if (m && s_conn != BLE_HS_CONN_HANDLE_NONE)
+                    ble_gatts_notify_custom(s_conn, s_status_val_handle, m);
+                return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+            }
             return handle_creds_write(ctxt->om);
         }
         if (ble_uuid_cmp(uuid, &UUID_KEY.u) == 0) {
+            if (!authed) return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
             return handle_key_write(ctxt->om);
         }
     }
@@ -349,6 +399,10 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
                 .uuid = &UUID_KEY.u,
                 .access_cb = gatt_access_cb,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+            }, {
+                .uuid = &UUID_AUTH.u,
+                .access_cb = gatt_access_cb,
+                .flags = BLE_GATT_CHR_F_WRITE,
             },
             { 0 }
         },
@@ -373,6 +427,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "central disconnected (reason %d)",
                  event->disconnect.reason);
         s_conn = BLE_HS_CONN_HANDLE_NONE;
+        s_authed_conn = BLE_HS_CONN_HANDLE_NONE;   // drop PIN auth on disconnect
         if (s_should_advertise) advertise();
         return 0;
     case BLE_GAP_EVENT_ADV_COMPLETE:

@@ -23,6 +23,7 @@
 #include "i2c_keyboard.h"
 #include "i18n.h"
 #include "settings.h"
+#include "security.h"
 #include "setup.h"
 #include "ui_home.h"
 #include "web_config.h"
@@ -37,6 +38,7 @@
 #include "sfx.h"
 #include "local_shell.h"
 #include "voice_input.h"
+#include "nat_tunnel.h"
 
 static const char *TAG = "main";
 
@@ -93,6 +95,10 @@ static void wifi_boot_task(void *arg)
     }
     web_config_start(&s_settings, ui_home_refresh);
     ESP_LOGI(TAG, "wifi up, web config started");
+    // Reverse tunnel: dial the relay so the device's port 80 (and 8080) are
+    // reachable at a public subdomain. Loopback proxy -> 127.0.0.1, so it must
+    // start after web_config (the thing it exposes) is listening.
+    if (s_settings.nat_enabled) nat_tunnel_start();
     vTaskDelete(NULL);
 }
 
@@ -149,6 +155,7 @@ void app_main(void)
     // Load settings BEFORE building the home panel so the saved UI language is
     // applied to every label at creation time (i18n_set_lang before ui_home_create).
     settings_load(&s_settings);
+    security_init();            // device PIN (gates web + BLE); logs it to serial
     i18n_set_lang((lang_t)s_settings.lang);
     ui_home_create(&s_settings);  // hidden home panel (needs the CJK font too)
     ime_filter_init(s_term);    // pinyin decoder from the SD dictionary
@@ -180,6 +187,7 @@ void app_main(void)
     ESP_ERROR_CHECK(wifi_init());
     s_wifi_phase_done = true;
     wifi_start_status_updates();
+    nat_tunnel_init(&s_settings);   // tunnel started later in wifi_boot_task
     ble_prov_init(&s_settings, on_ble_creds);   // needs esp_hosted from wifi_init
     if (s_settings.wifi_ssid[0]) xTaskCreate(wifi_boot_task, "wifi_boot", 4096, NULL, 4, NULL);
 

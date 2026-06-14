@@ -8,3 +8,5 @@ dependencies:
   skuodi/libssh2_esp: "^1.1.0"
   # USB-A host port -> external keyboard
   espressif/usb_host_hid: "^1.0.4"
+  # T5NAT reverse tunnel: WSS to the relay (esp-tls backend). See nat_tunnel.c
+  espressif/esp_websocket_client: "^1.2"

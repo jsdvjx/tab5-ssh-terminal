@@ -13,6 +13,8 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "cJSON.h"
+#include "mbedtls/base64.h"
+#include "security.h"
 
 #include "lvgl.h"
 
@@ -33,8 +35,48 @@ static void (*s_on_update)(void);
 extern const char _binary_index_html_start[];
 extern const char _binary_index_html_end[];
 
+// ---- HTTP Basic Auth: every endpoint is gated on the device PIN ----------
+// Authorization: Basic base64(user:pass). Any username is accepted; the
+// password must equal security_pin(). On failure send 401 with a
+// WWW-Authenticate challenge so browsers prompt; curl uses --user tab5:<PIN>.
+
+static bool web_authed(httpd_req_t *req)
+{
+    char hdr[128];
+    if (httpd_req_get_hdr_value_str(req, "Authorization", hdr, sizeof(hdr)) != ESP_OK) {
+        return false;
+    }
+    const char *b64 = hdr;
+    if (strncasecmp(b64, "Basic ", 6) != 0) return false;
+    b64 += 6;
+    while (*b64 == ' ') b64++;
+
+    unsigned char dec[128];
+    size_t dlen = 0;
+    if (mbedtls_base64_decode(dec, sizeof(dec) - 1, &dlen,
+                              (const unsigned char *)b64, strlen(b64)) != 0) {
+        return false;
+    }
+    dec[dlen] = 0;
+    char *colon = strchr((char *)dec, ':');
+    if (!colon) return false;
+    return security_check(colon + 1);   // password == PIN; username ignored
+}
+
+static esp_err_t web_401(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Tab5\"");
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, "authentication required");
+}
+
+// One-line guard for the top of every handler.
+#define REQUIRE_AUTH(req) do { if (!web_authed(req)) return web_401(req); } while (0)
+
 static esp_err_t index_get(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, _binary_index_html_start,
                            _binary_index_html_end - _binary_index_html_start - 1);
@@ -42,6 +84,7 @@ static esp_err_t index_get(httpd_req_t *req)
 
 static esp_err_t targets_get(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     cJSON *root = cJSON_CreateObject();
     cJSON *arr = cJSON_AddArrayToObject(root, "targets");
     for (int i = 0; i < s_cfg->n_targets; i++) {
@@ -88,6 +131,7 @@ static const char *jstr(cJSON *o, const char *key)
 
 static esp_err_t targets_post(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     static char body[8192];
     if (read_body(req, body, sizeof(body)) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large");
@@ -161,6 +205,7 @@ extern volatile uint32_t g_dbg_kbd_events, g_dbg_sink_bytes, g_dbg_ssh_rx,
                          g_dbg_render_ticks;
 static esp_err_t debug_get(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     extern size_t heap_caps_get_free_size(uint32_t caps);
     char buf[768];
     int len = snprintf(buf, sizeof(buf),
@@ -211,6 +256,7 @@ static esp_err_t debug_get(httpd_req_t *req)
 // host without a card reader.
 static esp_err_t sdput_post(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     char query[80] = {0}, name[40] = {0};
     httpd_req_get_url_query_str(req, query, sizeof(query));
     if (httpd_query_key_value(query, "name", name, sizeof(name)) != ESP_OK || !name[0]) {
@@ -264,6 +310,7 @@ static esp_err_t sdput_post(httpd_req_t *req)
 // and return the first candidates. Remote verification without a keyboard.
 static esp_err_t ime_get(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     char query[80] = {0}, py[40] = {0};
     httpd_req_get_url_query_str(req, query, sizeof(query));
     if (httpd_query_key_value(query, "py", py, sizeof(py)) != ESP_OK || !py[0]) {
@@ -297,6 +344,7 @@ static esp_err_t ime_get(httpd_req_t *req)
 // touching the device. Remove once voice input is trusted.
 static esp_err_t rec_post(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     char query[32] = {0}, val[12] = {0};
     int ms = 3000;
     httpd_req_get_url_query_str(req, query, sizeof(query));
@@ -320,6 +368,7 @@ static esp_err_t rec_post(httpd_req_t *req)
 
 static esp_err_t reboot_post(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     httpd_resp_sendstr(req, "rebooting");
     vTaskDelay(pdMS_TO_TICKS(300));
     esp_restart();
@@ -375,6 +424,7 @@ static esp_err_t send_bmp_rgb565(httpd_req_t *req, const uint8_t *fb,
 // before the snapshot — Ctrl+Alt+P can't be pressed remotely.
 static esp_err_t shot_get(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     char query[64] = {0}, val[8] = {0};
     httpd_req_get_url_query_str(req, query, sizeof(query));
 
@@ -445,6 +495,7 @@ static esp_err_t shot_get(httpd_req_t *req)
 // be the more surprising behavior.
 static esp_err_t connect_post(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
     char body[64];
     if (read_body(req, body, sizeof(body)) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
